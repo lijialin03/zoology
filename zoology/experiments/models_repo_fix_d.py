@@ -1,9 +1,11 @@
 from zoology.config import ModelConfig, ModuleConfig
 
+DEFAULT_D_MODELS = [32, 64, 128]
+
 
 # Attention
-def add_attention(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    for d_model in [32, 64, 128]:
+def add_attention(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    for d_model in (d_models or DEFAULT_D_MODELS):
         attention_mixer = dict(
             name="zoology.mixers.attention.MHA",
             kwargs={
@@ -30,13 +32,8 @@ def add_attention(models, conv_mixer, input_seq_len, model_factory_kwargs, num_l
 
 
 # BASED
-def add_based(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    for d_model in [
-        48,
-        64, 
-        128, 
-        # 256
-    ]:
+def add_based(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    for d_model in (d_models or DEFAULT_D_MODELS):
         for ftr_dim in [
             8, 
             16, 
@@ -74,9 +71,9 @@ def add_based(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
     return models
 
 
-# Sliding window 
-def add_sliding_window(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    for d_model in [128]:
+# Sliding window
+def add_sliding_window(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    for d_model in (d_models or DEFAULT_D_MODELS):
         for slide_width in [8, 16, 32, 64, 128, 256, 512, 1024]:
             slide_attn = dict(
                 name="zoology.mixers.slide_attn.SlidingAttn",
@@ -105,10 +102,10 @@ def add_sliding_window(models, conv_mixer, input_seq_len, model_factory_kwargs, 
     return models
 
 
-# Mamba 
-def add_mamba(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+# Mamba
+def add_mamba(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "MambaBlock"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         for d_state in [8, 16, 24]:
             mixer = dict(
                 name="zoology.mixers.mamba.Mamba",
@@ -128,9 +125,9 @@ def add_mamba(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
 
 
 # Mamba2
-def add_mamba2(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_mamba2(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "Mamba2Block"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         for d_state in [8, 16, 24]:
             mixer = dict(
                 name="zoology.mixers.mamba2.Mamba2",
@@ -149,10 +146,10 @@ def add_mamba2(models, conv_mixer, input_seq_len, model_factory_kwargs, num_laye
     return models
 
 
-# Hyena 
-def add_hyena(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+# Hyena
+def add_hyena(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         mixer = dict(
             name="zoology.mixers.hyena.Hyena",
             kwargs={"l_max": input_seq_len}
@@ -170,10 +167,10 @@ def add_hyena(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
     return models
 
 
-# H3 
-def add_h3(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+# H3
+def add_h3(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         mixer = dict(
             name="zoology.mixers.h3.H3",
             kwargs={
@@ -196,9 +193,9 @@ def add_h3(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2
 
 
 # RWKV7
-def add_rwkv7(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_rwkv7(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         rwkv7_mixer = dict(
             name="zoology.mixers.rwkv7.RWKV7Attention",
             kwargs={
@@ -229,9 +226,9 @@ def add_rwkv7(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
 
 
 # DeltaNet
-def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]: 
+    for d_model in (d_models or DEFAULT_D_MODELS):
         delta_net_mixer = dict(
             name="zoology.mixers.delta_net.DeltaNet",
             kwargs={
@@ -262,15 +259,15 @@ def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_l
 
 
 # Gated DeltaNet
-def add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]: 
+    for d_model in (d_models or DEFAULT_D_MODELS):
         delta_net_mixer = dict(
             name="zoology.mixers.gated_delta_net.GatedDeltaNet",
             kwargs={
                 "l_max": input_seq_len,
                 "num_heads": 2,         # Tune
-                "use_gate": True,       # Tune
+                "use_gate": True,      # Tune
                 "use_short_conv": True, # Tune
                 "conv_size": 4
             }
@@ -294,9 +291,9 @@ def add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs,
 
 
 # Gated linear attention
-def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]: 
+    for d_model in (d_models or DEFAULT_D_MODELS):
         delta_net_mixer = dict(
             name="zoology.mixers.gla.GatedLinearAttention",
             kwargs={
@@ -323,9 +320,9 @@ def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
 
 
 # Deepseek NSA
-def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]: 
+    for d_model in (d_models or DEFAULT_D_MODELS):
         nsa_mixer = dict(
             name="zoology.mixers.deepseek_nsa.SparseAttention",
             kwargs={
@@ -336,8 +333,7 @@ def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, nu
                 "num_selected_blocks": 4,   # Tune
             }
         )
-        # mixers = [conv_mixer, nsa_mixer] if conv_mixer is not None else [nsa_mixer]
-        mixers = [conv_mixer, nsa_mixer, nsa_mixer] if conv_mixer is not None else [nsa_mixer, nsa_mixer]
+        mixers = [conv_mixer, nsa_mixer] if conv_mixer is not None else [nsa_mixer]
         mixer = ModuleConfig(
             name="zoology.mixers.hybrid.Hybrid",
             kwargs={"configs": mixers}
@@ -355,267 +351,10 @@ def add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, nu
     return models
 
 
-# CSA (Compressed Sparse Attention)
-def add_csa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        csa_mixer = dict(
-            name="zoology.mixers.csa_hca.CSAttention",
-            kwargs={
-                "num_heads": 2,             # aligned with add_deepseek_nsa
-                "window_size": 16,
-                "compress_ratio": 4,
-                "index_topk": 4,            # aligned with num_selected_blocks=4 in NSA
-                "dropout": 0.0,
-            }
-        )
-        mixers = [conv_mixer, csa_mixer, csa_mixer] if conv_mixer is not None else [csa_mixer, csa_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="csa",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# HCA (Heavily Compressed Attention)
-def add_hca(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        hca_mixer = dict(
-            name="zoology.mixers.csa_hca.HCAAttention",
-            kwargs={
-                "num_heads": 2,             # aligned with add_deepseek_nsa
-                "window_size": 16,
-                "compress_ratio": 128,
-                "dropout": 0.0,
-            }
-        )
-        mixers = [conv_mixer, hca_mixer, hca_mixer] if conv_mixer is not None else [hca_mixer, hca_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="hca",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# DeepSeek CSA+HCA
-def add_deepseek_csa_hca(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    """Alternates CSA (ratio=4) and HCA (ratio=128) across layers.
-
-    Mirrors DeepSeek-V4's per-layer compress_ratios pattern:
-      layers:  CSA → HCA → CSA → HCA → CSA → ...
-    Uses Hybrid with [csa_mixer, hca_mixer] so layer_idx % 2 toggles.
-    """
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        csa_mixer = dict(
-            name="zoology.mixers.csa_hca.CSAttention",
-            kwargs={
-                "num_heads": 2,             # aligned with add_deepseek_nsa
-                "window_size": 16,
-                "compress_ratio": 4,
-                "index_topk": 4,            # aligned with num_selected_blocks=4 in NSA
-                "dropout": 0.0,
-            }
-        )
-        hca_mixer = dict(
-            name="zoology.mixers.csa_hca.HCAAttention",
-            kwargs={
-                "num_heads": 2,             # aligned with add_deepseek_nsa
-                "window_size": 16,
-                "compress_ratio": 128,
-                "dropout": 0.0,
-            }
-        )
-        mixers = [conv_mixer, csa_mixer, hca_mixer] if conv_mixer is not None else [csa_mixer, hca_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="deepseek_csa_hca",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# DeepSeek-V4 (strict compress_ratios replication)
-def add_deepseek_v4(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=8):
-    """Strictly replicates DeepSeek-V4's per-layer compress_ratios pattern:
-
-    compress_ratios = (0, 0, 4, 128, 4, 128, 4, 0)
-
-    Layer mapping:
-      0: window-only  (SlidingAttn)
-      1: window-only  (SlidingAttn)
-      2: CSA          (compress_ratio=4)
-      3: HCA          (compress_ratio=128)
-      4: CSA          (compress_ratio=4)
-      5: HCA          (compress_ratio=128)
-      6: CSA          (compress_ratio=4)
-      7: window-only  (SlidingAttn)
-
-    Note: conv_mixer is intentionally ignored to preserve the strict 8-layer pattern.
-    """
-    if conv_mixer is not None:
-        import warnings
-        warnings.warn(
-            "add_deepseek_v4 ignores conv_mixer to strictly replicate the 8-layer "
-            "compress_ratios pattern (0, 0, 4, 128, 4, 128, 4, 0)."
-        )
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        window_mixer = dict(
-            name="zoology.mixers.slide_attn.SlidingAttn",
-            kwargs={
-                "block_size": 16,
-                "attention_dropout": 0.0
-            }
-        )
-        csa_mixer = dict(
-            name="zoology.mixers.csa_hca.CSAttention",
-            kwargs={
-                "num_heads": 2,
-                "window_size": 16,
-                "compress_ratio": 4,
-                "index_topk": 4,
-                "dropout": 0.0,
-            }
-        )
-        hca_mixer = dict(
-            name="zoology.mixers.csa_hca.HCAAttention",
-            kwargs={
-                "num_heads": 2,
-                "window_size": 16,
-                "compress_ratio": 128,
-                "dropout": 0.0,
-            }
-        )
-        # compress_ratios = (0, 0, 4, 128, 4, 128, 4, 0)
-        configs = [
-            window_mixer,  # layer 0: ratio=0
-            window_mixer,  # layer 1: ratio=0
-            csa_mixer,     # layer 2: ratio=4
-            hca_mixer,     # layer 3: ratio=128
-            csa_mixer,     # layer 4: ratio=4
-            hca_mixer,     # layer 5: ratio=128
-            csa_mixer,     # layer 6: ratio=4
-            window_mixer,  # layer 7: ratio=0
-        ]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": configs}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=8,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="deepseek_v4",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# CLA (Compressed Linear Attention)
-def add_cla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        cla_mixer = dict(
-            name="zoology.mixers.compressed_linear_attention.CompressedLinearAttention",
-            kwargs={
-                "num_heads": 2,
-                "window_size": 16,
-                "compress_ratio": 4,
-                "index_topk": 4,
-                "expand_k": 1.0,
-                "expand_v": 1.0,
-                "dropout": 0.0,
-                "use_beta": True,
-            }
-        )
-        mixers = [conv_mixer, cla_mixer, cla_mixer] if conv_mixer is not None else [cla_mixer, cla_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type=block_type,
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="cla",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
-# Momentum DeltaNet
-def add_momentum_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
-    block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
-        mdn_mixer = dict(
-            name="zoology.mixers.momentum_delta_net.MomentumDeltaNet",
-            kwargs={
-                "l_max": input_seq_len,
-                "num_heads": 2,
-                "use_gate": True,
-                "use_short_conv": True,
-                "conv_size": 4,
-            }
-        )
-        mixers = [conv_mixer, mdn_mixer] if conv_mixer is not None else [mdn_mixer]
-        mixer = ModuleConfig(
-            name="zoology.mixers.hybrid.Hybrid",
-            kwargs={"configs": mixers}
-        )
-        model = ModelConfig(
-            block_type="TransformerBlock",
-            d_model=d_model,
-            n_layers=num_layers,
-            sequence_mixer=mixer,
-            max_position_embeddings=0,
-            name="momentum_delta_net",
-            **model_factory_kwargs
-        )
-        models.append(model)
-    return models
-
-
 # TTT (Test-Time Training)
-def add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+def add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
     block_type = "TransformerBlock"
-    for d_model in [64, 128, 256]:
+    for d_model in (d_models or DEFAULT_D_MODELS):
         for ttt_type in ["mlp", "linear"]:  
             for mini_batch_size in [16, 32]:
                 ttt_mixer = dict(
@@ -647,3 +386,6 @@ def add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
                 )
                 models.append(model)
     return models
+
+
+

@@ -48,9 +48,9 @@ def main(python_file, outdir, name: str, parallelize: bool, gpus: str):
     use_ray = parallelize and len(configs) > 0
     if use_ray:
         import ray
-        # ray was killing workers due to OOM, but it didn't seem to be necessary 
+        # ray was killing workers due to OOM, but it didn't seem to be necessary
         os.environ["RAY_memory_monitor_refresh_ms"] = "0"
-        ray.init(ignore_reinit_error=True, log_to_driver=False)
+        ray.init(num_cpus=8, ignore_reinit_error=True, log_to_driver=False)
 
     name = name + datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     print(f"Running sweep {name} with {len(configs)} configs")
@@ -65,7 +65,7 @@ def main(python_file, outdir, name: str, parallelize: bool, gpus: str):
         total = len(configs)
         print(f"Completed: {completed} ({completed / total:0.1%}) | Total: {total}")
 
-        remote = ray.remote(num_gpus=(1 // MAX_WORKERS_PER_GPU))(execute_config)
+        remote = ray.remote(num_gpus=(1 // MAX_WORKERS_PER_GPU), max_retries=0)(execute_config)
         futures = [remote.remote(config) for config in configs]
         
         while futures:

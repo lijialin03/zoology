@@ -8,6 +8,7 @@ sweep_id = uuid.uuid4().hex[:6]
 sweep_name = "011026-data=mqar-random-false-emb=spherical-learn=True-v3" + sweep_id
 
 VOCAB_SIZE = 8_192
+CACHE_DIR = "/home/ssd2/harness/zoology/zoology/cache_dir"
 
 # 1. First we are going to create the data configuration
 
@@ -35,7 +36,7 @@ data = DataConfig(
     test_configs=test_configs,
     # can pass a tuple if you want a different batch size for train and test
     batch_size=(batch_size, batch_size // 8),
-    cache_dir="/data/sim/zoology"
+    cache_dir=CACHE_DIR
 )
 
 # 2. Next, we are going to collect all the different model configs we want to sweep
@@ -56,7 +57,7 @@ conv_mixer = dict(
 )
 
 
-from zoology.experiments.models_repo import (
+from zoology.experiments.models_repo_fix_d import (
     add_attention, add_sliding_window,add_based, add_mamba2, add_rwkv7, 
     add_delta_net, add_gla, add_gated_delta_net, add_deepseek_nsa, add_ttt
 )
@@ -74,14 +75,23 @@ models = add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs)
 
 # convenience for filtering out 
 included = [
-    "attention", "sliding_window", 
-    # "based", 
-    # "delta_net", "gla", 
+    "attention", 
+    # "sliding-window", 
+    "based", 
+    "delta_net", 
+    "gla", 
     "gated_delta_net", 
-    # "deepseek_nsa", 
-    "ttt_linear", "ttt_mlp"
-    ]
+    "deepseek_nsa", 
+    # "ttt_linear", 
+    # "ttt_mlp",
+]
 models = [m for m in models if any([i in m.name for i in included])]
+
+# exclued = [
+#     "sliding-window"
+# ]
+
+# models = [m for m in models if any([i not in m.name for i in included])]
 
 for model in models:
     model.embedding_init_type = "spherical"
@@ -105,7 +115,7 @@ for model in models:
             slice_keys=["num_kv_pairs"],
             sweep_id=sweep_name,
             run_id=run_id,
-            predictions_path=f"/data/sim/zoology/predictions/{run_id}",
+            predictions_path=f"{CACHE_DIR}/predictions/{run_id}",
             collect_predictions=True,
         )
         configs.append(config)
