@@ -243,7 +243,7 @@ def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_l
                 "conv_size": 4
             }
         )
-        mixers = [conv_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer]
+        mixers = [conv_mixer, delta_net_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer, delta_net_mixer]
         mixer = ModuleConfig(
             name="zoology.mixers.hybrid.Hybrid",
             kwargs={"configs": mixers}
@@ -360,7 +360,7 @@ def add_csa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     block_type = "TransformerBlock"
     for d_model in [64, 128, 256]:
         csa_mixer = dict(
-            name="zoology.mixers.csa_hca.CSAttention",
+            name="zoology.mixers.csa_hca.SimpleCSA",
             kwargs={
                 "num_heads": 2,             # aligned with add_deepseek_nsa
                 "window_size": 16,
@@ -392,7 +392,7 @@ def add_hca(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     block_type = "TransformerBlock"
     for d_model in [64, 128, 256]:
         hca_mixer = dict(
-            name="zoology.mixers.csa_hca.HCAAttention",
+            name="zoology.mixers.csa_hca.SimpleHCA",
             kwargs={
                 "num_heads": 2,             # aligned with add_deepseek_nsa
                 "window_size": 16,
@@ -429,7 +429,7 @@ def add_deepseek_csa_hca(models, conv_mixer, input_seq_len, model_factory_kwargs
     block_type = "TransformerBlock"
     for d_model in [64, 128, 256]:
         csa_mixer = dict(
-            name="zoology.mixers.csa_hca.CSAttention",
+            name="zoology.mixers.csa_hca.SimpleCSA",
             kwargs={
                 "num_heads": 2,             # aligned with add_deepseek_nsa
                 "window_size": 16,
@@ -439,7 +439,7 @@ def add_deepseek_csa_hca(models, conv_mixer, input_seq_len, model_factory_kwargs
             }
         )
         hca_mixer = dict(
-            name="zoology.mixers.csa_hca.HCAAttention",
+            name="zoology.mixers.csa_hca.SimpleHCA",
             kwargs={
                 "num_heads": 2,             # aligned with add_deepseek_nsa
                 "window_size": 16,
@@ -550,16 +550,19 @@ def add_cla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     block_type = "TransformerBlock"
     for d_model in [64, 128, 256]:
         cla_mixer = dict(
-            name="zoology.mixers.compressed_linear_attention.CompressedLinearAttention",
+            name="zoology.mixers.cla.CompressedLinearAttention",
             kwargs={
                 "num_heads": 2,
                 "window_size": 16,
-                "compress_ratio": 4,
-                "index_topk": 4,
+                "compress_ratio": 2,
+                "use_sliding": False,
                 "expand_k": 1.0,
                 "expand_v": 1.0,
                 "dropout": 0.0,
-                "use_beta": True,
+                "use_beta": True,       # Tune
+                "use_gate": False,      # Tune
+                "use_short_conv": True, # Tune
+                "conv_size": 4
             }
         )
         mixers = [conv_mixer, cla_mixer, cla_mixer] if conv_mixer is not None else [cla_mixer, cla_mixer]

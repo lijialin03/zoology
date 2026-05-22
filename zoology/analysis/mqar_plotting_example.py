@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 
 from zoology.analysis.utils import fetch_wandb_runs
 
+MODEL_NAME = "name"
+DMODEL_NAME = "d_model"
+
 
 model2color = {
     "Hyena": "#BAB0AC",
@@ -26,6 +29,9 @@ model2color = {
 
     'Ttt linear': "#D3722C",
     'Ttt mlp': "#EDC948",
+    'CSA': "#AF7AA1", # 一种紫色
+    'Deepseek csa hca': "#8CD17D", # 一种绿色
+    'New Model 3': "#FF9DA7", # 一种粉色/珊瑚色
 }
 
 graph_order = [
@@ -42,6 +48,8 @@ graph_order = [
     "Gated DeltaNet",
     'TTT Linear',
     'TTT MLP',
+    'CSA',
+    'Deepseek csa hca',
 ]
 
 name_replacements = {
@@ -54,6 +62,8 @@ name_replacements = {
     "Sliding window attention": "Sliding Window",
     "Ttt linear": "TTT Linear",
     "Ttt mlp": "TTT MLP",
+    'csa':'CSA',
+    'deepseek-csa-hca':'Deepseek csa hca',
 }
 
 def _normalize_model_key(s: str) -> str:
@@ -94,26 +104,28 @@ def plot(
 ):
 
     idx = df.groupby(
-        ["state_size", "model.name"]
+        ["state_size", MODEL_NAME]
     )[metric].idxmax(skipna=True).dropna()
     plot_df = df.loc[idx]
 
-    # upper case the model names first letter
-    plot_df["model.name"] = plot_df["model.name"].str.capitalize()
-    # replace "-" and "_" with " "
-    plot_df["model.name"] = plot_df["model.name"].str.replace("-", " ")
-    plot_df["model.name"] = plot_df["model.name"].str.replace("_", " ")
-    # replace model column name with "Model"
-    plot_df["Model"] = _apply_name_replacements(plot_df["model.name"])
+    plot_df[DMODEL_NAME] = plot_df[MODEL_NAME].str.extract(r'd(\d+)')
 
-    # (06/05) adjust the state sizes for rwkv v7
-    rwkv_mask = (plot_df["Model"] == "Rwkv7")
-    rwkv_mask_128 = (plot_df["Model"] == "Rwkv7") & (plot_df["model.d_model"] == 128)
-    rwkv_mask_256 = (plot_df["Model"] == "Rwkv7") & (plot_df["model.d_model"] == 256)
-    print(plot_df[['Model', 'state_size', 'model.d_model']][rwkv_mask_128 | rwkv_mask_256])
-    plot_df.loc[rwkv_mask_128, "state_size"] /= 4
-    plot_df.loc[rwkv_mask_256, "state_size"] /= 16
-    print(plot_df[['Model', 'state_size', 'model.d_model']][rwkv_mask])
+    # upper case the model names first letter
+    plot_df[MODEL_NAME] = plot_df[MODEL_NAME].str.capitalize()
+    # replace "-" and "_" with " "
+    plot_df[MODEL_NAME] = plot_df[MODEL_NAME].str.replace("-", " ")
+    plot_df[MODEL_NAME] = plot_df[MODEL_NAME].str.replace("_", " ")
+    # replace model column name with "Model"
+    plot_df["Model"] = _apply_name_replacements(plot_df[MODEL_NAME])
+
+    # # (06/05) adjust the state sizes for rwkv v7
+    # rwkv_mask = (plot_df["Model"] == "Rwkv7")
+    # rwkv_mask_128 = (plot_df["Model"] == "Rwkv7") & (plot_df[DMODEL_NAME] == 128)
+    # rwkv_mask_256 = (plot_df["Model"] == "Rwkv7") & (plot_df[DMODEL_NAME] == 256)
+    # print(plot_df[['Model', 'state_size', DMODEL_NAME]][rwkv_mask_128 | rwkv_mask_256])
+    # plot_df.loc[rwkv_mask_128, "state_size"] /= 4
+    # plot_df.loc[rwkv_mask_256, "state_size"] /= 16
+    # print(plot_df[['Model', 'state_size', DMODEL_NAME]][rwkv_mask])
 
     palette = _mapped_palette(model2color, name_replacements)
 
@@ -154,10 +166,15 @@ def plot(
 
     # --- Find the leftmost point (smallest state_size) with accuracy near 1.0 ---
     # tweak tolerance if needed (here: >= 0.99 accuracy)
-    point = plot_df.loc[
-        plot_df[metric] >= 0.99, ["state_size", metric]
-    ].sort_values("state_size").iloc[0]
+    filtered_sorted_df = plot_df.loc[plot_df[metric] >= 0.99, ["state_size", metric]].sort_values("state_size")
 
+    first_idx = filtered_sorted_df.index[0] if not filtered_sorted_df.empty else None
+
+    if first_idx is None:
+        print(f"No data points found where {metric} >= 0.99")
+        return
+
+    point = filtered_sorted_df.loc[first_idx]
     x_val, y_val = point["state_size"], point[metric]
 
     # --- Draw vertical dashed line ---
@@ -177,45 +194,43 @@ def plot(
 if __name__ == "__main__" :
     df = fetch_wandb_runs(
         launch_id=[
-            "default-2024-02-09-05-44-06",
-            "default-2024-02-09-14-59-58",
-            "default-2024-12-28-14-12-35",
+            "default-2026-05-25-09-17-08",
         ], 
-        project_name="zoology"
+        project_name="zoology-deepseek_csa-hca"
     )
 
-    df2 = fetch_wandb_runs(
-        launch_id=[
-            # Adding RWKV-v7
-            "default-2025-03-04-16-43-26",
-            "default-2025-03-04-15-55-12",
-            "default-2025-03-04-15-11-23"
+    # df2 = fetch_wandb_runs(
+    #     launch_id=[
+    #         # Adding RWKV-v7
+    #         "default-2025-03-04-16-43-26",
+    #         "default-2025-03-04-15-55-12",
+    #         "default-2025-03-04-15-11-23"
 
-            # Adding NSA
-            "default-2025-03-06-11-46-30",
+    #         # Adding NSA
+    #         "default-2025-03-06-11-46-30",
 
-            # Adding DeltaNet
-            "default-2025-03-05-14-30-11",
-            "default-2025-03-05-14-07-18",
-            "default-2025-03-05-14-59-58",
+    #         # Adding DeltaNet
+    #         "default-2025-03-05-14-30-11",
+    #         "default-2025-03-05-14-07-18",
+    #         "default-2025-03-05-14-59-58",
 
-            # Adding Gated DeltaNet
-            "default-2025-03-05-16-20-42",
-            "default-2025-03-05-16-41-32",
+    #         # Adding Gated DeltaNet
+    #         "default-2025-03-05-16-20-42",
+    #         "default-2025-03-05-16-41-32",
 
-            # Adding Gated Linear Attention (GLA)
-            "default-2025-03-05-16-01-15",
+    #         # Adding Gated Linear Attention (GLA)
+    #         "default-2025-03-05-16-01-15",
 
-            # Adding TTT Linear
-            "default-2026-01-09-20-46-16",
-            # Adding TTT MLP
-            "default-2026-01-09-22-37-36",
-        ], 
-        project_name="0325_zoology"
-    )
+    #         # Adding TTT Linear
+    #         "default-2026-01-09-20-46-16",
+    #         # Adding TTT MLP
+    #         "default-2026-01-09-22-37-36",
+    #     ], 
+    #     project_name="0325_zoology"
+    # )
 
-    # add the new runs to the df
-    df = pd.concat([df, df2]).reset_index(drop=True)
+    # # add the new runs to the df
+    # df = pd.concat([df, df2]).reset_index(drop=True)
 
     plot(df=df)
 

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import wandb
 from torch.nn import Module
+import os
 
 from zoology.model import LanguageModel
 from zoology.config import LoggerConfig, TrainConfig
