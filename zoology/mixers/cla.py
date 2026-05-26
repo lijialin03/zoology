@@ -20,11 +20,90 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from typing import List
 
-from zoology.mixers.csa_hca import GatedPoolCompressor
+# from zoology.mixers.csa_hca import GatedPoolCompressor
 from zoology.mixers.delta_net import DeltaNet
 from zoology.mixers.slide_attn import SlidingAttn
+
+# ---------------------------------------------------------------------------
+# gated-pooling compressor
+# ---------------------------------------------------------------------------
+
+class GatedPoolCompressor(nn.Module):
+    """Compresses a sequence via learned gated pooling over ``compress_ratio``
+    consecutive tokens.
+
+    When *overlap* is True (ratio <= 4), adjacent compression windows share one
+    token for smoother boundaries.  This mirrors ``model.py:Compressor`` without
+    quantization, RoPE, Hadamard rotation, or incremental-decode state.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        head_dim: int,
+        compress_ratio: int = 4,
+        overlap: bool = False,
+        **kwargs,
+    ):
+        super().__init__()
+        self.compress_ratio = compress_ratio
+        self.head_dim = head_dim
+        self.overlap = overlap and compress_ratio <= 4
+        coff = 2 if self.overlap else 1
+
+        self.wkv = nn.Linear(d_model, coff * head_dim, bias=False)
+        self.wgate = nn.Linear(d_model, coff * head_dim, bias=False)
+        self.ape = nn.Parameter(torch.empty(compress_ratio, coff * head_dim))
+        self.norm = nn.RMSNorm(head_dim)
+
+        nn.init.normal_(self.ape, mean=0.0, std=0.02)
+
+        self.tau = nn.Parameter(torch.ones(1) * 2.0)   # 可学习温度
+        self.base_weight = nn.Parameter(torch.ones(compress_ratio, 1) / compress_ratio)  # 可学习基值
+
+    # ------------------------------------------------------------------
+    def _overlap_transform(self, x: torch.Tensor, fill_value: float):
+        """Shift the first half of dims one block forward (overlapping windows)."""
+        b, n, r, coff_d = x.shape
+        d = self.head_dim
+        new = x.new_full((b, n, 2 * r, d), fill_value)
+        new[:, :, r:, :] = x[:, :, :, d:]        # normal half
+        new[:, 1:, :r, :] = x[:, :-1, :, :d]     # overlapping half (shifted)
+        return new
+
+    # ------------------------------------------------------------------
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [b, s, d_model]  ->  compressed: [b, n_blocks, head_dim]"""
+        b, s, _ = x.shape
+        ratio = self.compress_ratio
+
+        # pad to multiple of ratio
+        remainder = s % ratio
+        pad_len = (ratio - remainder) % ratio
+        if remainder > 0:
+            x = F.pad(x, (0, 0, 0, pad_len))
+
+        kv = self.wkv(x).unflatten(1, (-1, ratio))
+        # score = self.wgate(x).unflatten(1, (-1, ratio)) + self.ape
+
+        base = self.base_weight.view(1,1,ratio,1)   # [1,1,ratio,1]
+        score = base + (self.wgate(x).unflatten(1, (-1, ratio)) + self.ape) / self.tau
+
+        if pad_len > 0:
+            valid_mask = torch.zeros(b, s + pad_len, device=x.device, dtype=torch.bool)
+            valid_mask[:, :s] = True
+            score = score.masked_fill(~valid_mask.view(b, -1, ratio, 1), float("-inf"))
+
+        if self.overlap:
+            kv = self._overlap_transform(kv, 0.0)
+            score = self._overlap_transform(score, float("-inf"))
+
+        kv = (kv * score.softmax(dim=2)).sum(dim=2)          # [b, n_blocks, head_dim]
+        kv = self.norm(kv)
+
+        return kv
 
 
 class CompressedLinearAttention(nn.Module):
@@ -34,7 +113,9 @@ class CompressedLinearAttention(nn.Module):
             num_heads: int,
             use_sliding: bool = False,
             compress_ratio: int = 4,
+            overlap: bool = False,
             window_size: int = 32,
+            delta_net_kwargs: dict = None,
             **kwargs,
         ):
         super().__init__()
@@ -48,10 +129,10 @@ class CompressedLinearAttention(nn.Module):
             d_model=d_model,
             head_dim=self.head_dim,
             compress_ratio=compress_ratio,
-            overlap=True
+            overlap=overlap,
         )
         self.block_proj = nn.Linear(self.head_dim, d_model)
-        self.delta_net = DeltaNet(d_model=d_model, **kwargs)
+        self.delta_net = DeltaNet(d_model=d_model, **delta_net_kwargs)
         self.out_proj = nn.Linear(d_model, d_model * compress_ratio)
         self.block_pos_emb = nn.Embedding(compress_ratio, d_model)
 
@@ -65,7 +146,6 @@ class CompressedLinearAttention(nn.Module):
         # DeltaNet 处理压缩序列
         dn = self.delta_net(compressed)         # [B, n_blocks, D]
         # 将输出上采样回原始长度
-        
         dn_expanded = dn.unsqueeze(2).expand(-1, -1, self.compress_ratio, -1)  # [B, n_blocks, ratio, D]
         pos_emb = self.block_pos_emb.weight.unsqueeze(0).unsqueeze(0)           # [1, 1, ratio, D]
         dn_expanded = dn_expanded + pos_emb
@@ -76,6 +156,118 @@ class CompressedLinearAttention(nn.Module):
         # out = self.out_proj(dn)  # [B, n_blocks, D * ratio]
         # out = out.view(out.size(0), -1, self.d_model)  # [B, n_blocks * ratio, D]
         # return out[:, :x.shape[1], :]
+
+        # # 压缩时
+        # mean = kv.mean(dim=2)                # [B, n_blocks, head_dim]
+        # residual = kv[:, :, 0, :] - mean     # 取第一个 token 与均值的差
+        # # 将 mean 和 residual 拼接后投影到 d_model（或分别处理）
+        # compressed = torch.cat([mean, residual], dim=-1)  # [B, n_blocks, 2*head_dim]
+        # compressed = self.block_proj(compressed)          # -> [B, n_blocks, d_model]
+        # # DeltaNet 处理...
+        # # 上采样时，将 DeltaNet 输出再拆分为 mean' 和 residual'，然后重建
+        # mean_out, residual_out = dn.chunk(2, dim=-1)
+        # reconstructed = mean_out.unsqueeze(2) + residual_out.unsqueeze(2)  # 简单重建
+        # reconstructed = torch.cat([reconstructed, ...], dim=2)   # 需要恢复 ratio 个 token
+
+    # ------------------------------------------------------------------
+    def state_size(self, sequence_length: int = 2048) -> int:
+        """Compute total state size (for memory accounting).
+
+        Returns:
+            State size = delta_net.state_size
+        """
+        return self.delta_net.state_size(sequence_length)
+
+
+class MultiHeadCLA(nn.Module):
+    def __init__(
+            self, 
+            d_model: int,
+            num_heads: int,
+            use_sliding: bool = False,
+            compress_ratios: List[int] = [2, 4],
+            window_size: int = 32,
+            delta_net_kwargs: dict = None,
+            fusion: str = 'sum',   # 'sum', 'learned_sum', 'concat'
+            **kwargs,
+        ):
+        super().__init__()
+        self.d_model = d_model
+        self.head_dim = d_model // num_heads
+        self.use_sliding = use_sliding
+        self.compress_ratios = compress_ratios
+        self.fusion = fusion
+
+        if use_sliding:
+            self.sliding_attn = SlidingAttn(d_model, block_size=window_size)
+        else:
+            self.sliding_attn = None
+        
+        self.compressors = nn.ModuleList()
+        self.block_projs = nn.ModuleList()
+        self.out_projs = nn.ModuleList()
+        self.block_pos_embs = nn.ModuleList()
+
+        for ratio in compress_ratios:
+            self.compressors.append(
+                GatedPoolCompressor(
+                    d_model=d_model,
+                    head_dim=self.head_dim,
+                    compress_ratio=ratio,
+                    overlap=True   # ratio<=4 时自动启用重叠窗口
+                )
+            )
+            self.block_projs.append(nn.Linear(self.head_dim, d_model))
+            # 上采样：d_model -> d_model * ratio
+            self.out_projs.append(nn.Linear(d_model, d_model * ratio))
+            # 块内位置编码（可学习）
+            self.block_pos_embs.append(nn.Embedding(ratio, d_model))
+        
+        delta_net_kwargs = delta_net_kwargs or {}
+        delta_net_kwargs.setdefault('d_model', d_model)
+        self.delta_net = DeltaNet(**delta_net_kwargs)
+        
+        # 融合层（如果使用 concat 或 learned_sum）
+        if fusion == 'concat':
+            self.fusion_proj = nn.Linear(len(compress_ratios) * d_model, d_model)
+        elif fusion == 'learned_sum':
+            self.fusion_weights = nn.Parameter(torch.ones(len(compress_ratios)) / len(compress_ratios))
+        else:
+            self.fusion_weights = None
+            self.fusion_proj = None
+
+    def forward(self, x):
+        # x: [B, S, D]
+        if self.use_sliding:
+            x = self.sliding_attn(x) + x  # residual
+        
+        outputs = []
+        for i, ratio in enumerate(self.compress_ratios):
+            # 1. 压缩
+            compressed = self.compressors[i](x)                 # [B, n_blocks, head_dim]
+            compressed = self.block_projs[i](compressed)        # [B, n_blocks, D]
+            # 2. 共享 DeltaNet 处理压缩序列
+            dn = self.delta_net(compressed)                     # [B, n_blocks, D]
+            # 3. 上采样 + 块内位置编码
+            dn_expanded = dn.unsqueeze(2).expand(-1, -1, ratio, -1)  # [B, n_blocks, ratio, D]
+            pos_emb = self.block_pos_embs[i].weight.unsqueeze(0).unsqueeze(0)  # [1,1,ratio,D]
+            out_branch = dn_expanded + pos_emb
+            out_branch = out_branch.view(out_branch.size(0), -1, self.d_model)  # [B, n_blocks*ratio, D]
+            out_branch = out_branch[:, :x.shape[1], :]           # 截断至原始长度
+            outputs.append(out_branch)
+
+        # 融合多分支
+        if self.fusion == 'sum':
+            out = torch.stack(outputs, dim=0).sum(dim=0)
+        elif self.fusion == 'learned_sum':
+            weights = torch.softmax(self.fusion_weights, dim=0)
+            out = sum(w * o for w, o in zip(weights, outputs))
+        elif self.fusion == 'concat':
+            out = torch.cat(outputs, dim=-1)
+            out = self.fusion_proj(out)
+        else:
+            raise ValueError(f"Unknown fusion: {self.fusion}")
+        return out
 
     # ------------------------------------------------------------------
     def state_size(self, sequence_length: int = 2048) -> int:

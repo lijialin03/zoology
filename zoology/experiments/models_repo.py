@@ -553,16 +553,18 @@ def add_cla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
             name="zoology.mixers.cla.CompressedLinearAttention",
             kwargs={
                 "num_heads": 2,
-                "window_size": 16,
+                "window_size": 8,
                 "compress_ratio": 2,
+                "overlap": True,
                 "use_sliding": False,
-                "expand_k": 1.0,
-                "expand_v": 1.0,
-                "dropout": 0.0,
-                "use_beta": True,       # Tune
-                "use_gate": False,      # Tune
-                "use_short_conv": True, # Tune
-                "conv_size": 4
+                "delta_net_kwargs":{
+                    "l_max": input_seq_len,
+                    "num_heads": 2,         # Tune
+                    "use_beta": True,       # Tune
+                    "use_gate": False,      # Tune
+                    "use_short_conv": True, # Tune
+                    "conv_size": 4
+                }
             }
         )
         mixers = [conv_mixer, cla_mixer, cla_mixer] if conv_mixer is not None else [cla_mixer, cla_mixer]
@@ -577,6 +579,46 @@ def add_cla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
             sequence_mixer=mixer,
             max_position_embeddings=0,
             name="cla",
+            **model_factory_kwargs
+        )
+        models.append(model)
+    return models
+
+
+# MHCLA (Multi-Head Compressed Linear Attention)
+def add_mhcla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    block_type = "TransformerBlock"
+    for d_model in [64, 128, 256]:
+        cla_mixer = dict(
+            name="zoology.mixers.cla.MultiHeadCLA",
+            kwargs={
+                "num_heads": 2,
+                "window_size": 8,
+                "compress_ratios": [2, 4],
+                "use_sliding": False,
+                "fusion": "sum",
+                "delta_net_kwargs":{
+                    "l_max": input_seq_len,
+                    "num_heads": 2,         # Tune
+                    "use_beta": True,       # Tune
+                    "use_gate": False,      # Tune
+                    "use_short_conv": True, # Tune
+                    "conv_size": 4
+                }
+            }
+        )
+        mixers = [conv_mixer, cla_mixer, cla_mixer] if conv_mixer is not None else [cla_mixer, cla_mixer]
+        mixer = ModuleConfig(
+            name="zoology.mixers.hybrid.Hybrid",
+            kwargs={"configs": mixers}
+        )
+        model = ModelConfig(
+            block_type=block_type,
+            d_model=d_model,
+            n_layers=num_layers,
+            sequence_mixer=mixer,
+            max_position_embeddings=0,
+            name="mhcla",
             **model_factory_kwargs
         )
         models.append(model)
