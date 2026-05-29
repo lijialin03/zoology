@@ -106,6 +106,90 @@ class GatedPoolCompressor(nn.Module):
         return kv
 
 
+class GatedPoolExpander(nn.Module):
+    """
+    Expands sequence length by factor `expand_ratio` using gated linear projection.
+    Designed as the inverse of GatedPoolCompressor.
+
+    When overlap=True (and expand_ratio <= 4), each input token produces both a normal
+    window and an overlapping window. The overlapping window is shifted right and added
+    to the next token's normal window, creating smooth transitions.
+
+    Args:
+        d_model: input/output feature dimension
+        expand_ratio: integer factor to expand sequence length
+        overlap: if True, enable overlapping expansion (only for ratio <= 4)
+    """
+    def __init__(self, d_model: int, expand_ratio: int, overlap: bool = False, **kwargs):
+        super().__init__()
+        self.expand_ratio = expand_ratio
+        self.overlap = overlap and expand_ratio <= 4
+        coff = 2 if self.overlap else 1
+        self.coff = coff
+
+        # Linear layers to produce raw expansion features and gating logits
+        self.wexpand = nn.Linear(d_model, coff * expand_ratio * d_model, bias=False)
+        self.wgate = nn.Linear(d_model, coff * expand_ratio * d_model, bias=False)
+        # Learnable bias for each expanded position (shared across all tokens)
+        self.ape = nn.Parameter(torch.empty(coff * expand_ratio, d_model))
+        nn.init.normal_(self.ape, mean=0.0, std=0.02)
+
+    def _overlap_combine(self, x: torch.Tensor):
+        """
+        Combine normal and overlapping windows into final expanded sequence.
+
+        x: [B, S, 2*ratio, D] where ratio = expand_ratio
+        Returns: [B, S*ratio, D]
+        """
+        B, S, _, D = x.shape
+        ratio = self.expand_ratio
+        normal = x[:, :, :ratio, :]      # [B, S, ratio, D]
+        overlap = x[:, :, ratio:, :]     # [B, S, ratio, D]
+
+        out = torch.zeros(B, S * ratio, D, device=x.device, dtype=x.dtype)
+        out = out.view(B, S, ratio, D)
+        # Normal part occupies its own block
+        out = out + normal
+        # Overlapping part from previous block is added to the beginning of current block
+        out[:, 1:, :, :] += overlap[:, :-1, :, :]
+        out = out.view(B, -1, D)
+        return out
+
+    def forward(self, x):
+        """
+        x: [B, S, D]
+        Returns: [B, S * expand_ratio, D]
+        """
+        B, S, D = x.shape
+        ratio = self.expand_ratio
+        coff = self.coff
+
+        # Project to raw expansion and gates
+        expand = self.wexpand(x)                # [B, S, coff*ratio*D]
+        gate = self.wgate(x)                    # [B, S, coff*ratio*D]
+
+        # Reshape to separate the expansion dimension
+        expand = expand.view(B, S, coff * ratio, D)
+        gate = gate.view(B, S, coff * ratio, D)
+
+        # Add learnable bias to gates
+        gate = gate + self.ape.view(1, 1, -1, D)
+
+        # Sigmoid to produce weights in (0,1)
+        gate = torch.sigmoid(gate)
+
+        # Gated expansion
+        out = expand * gate                     # [B, S, coff*ratio, D]
+
+        if self.overlap:
+            out = self._overlap_combine(out)    # [B, S*ratio, D]
+        else:
+            # No overlap: simply flatten
+            out = out.view(B, -1, D)            # [B, S*ratio, D]
+
+        return out
+
+
 class CompressedLinearAttention(nn.Module):
     def __init__(
             self, 
@@ -132,25 +216,34 @@ class CompressedLinearAttention(nn.Module):
             overlap=overlap,
         )
         self.block_proj = nn.Linear(self.head_dim, d_model)
-        self.delta_net = DeltaNet(d_model=d_model, **delta_net_kwargs)
+        self.delta_net = DeltaNet(d_model=self.head_dim, **delta_net_kwargs)
         self.out_proj = nn.Linear(d_model, d_model * compress_ratio)
         self.block_pos_emb = nn.Embedding(compress_ratio, d_model)
+
+        self.res_proj = nn.Linear(d_model, d_model)
+        self.res_norm = nn.RMSNorm(d_model)
 
     def forward(self, x):
         # x: [B, S, D]
         if self.use_sliding:
             x = self.sliding_attn(x) + x  # residual
+
         compressed = self.compressor(x) # [B, n_blocks, head_dim]
         # 投影回 d_model
-        compressed = self.block_proj(compressed) # [B, n_blocks, D]
+        # compressed = self.block_proj(compressed) # [B, n_blocks, D]
         # DeltaNet 处理压缩序列
-        dn = self.delta_net(compressed)         # [B, n_blocks, D]
+        dn = self.delta_net(compressed)         # [B, n_blocks, head_dim]
+
+        dn = self.block_proj(dn)         # [B, n_blocks, D]
         # 将输出上采样回原始长度
         dn_expanded = dn.unsqueeze(2).expand(-1, -1, self.compress_ratio, -1)  # [B, n_blocks, ratio, D]
         pos_emb = self.block_pos_emb.weight.unsqueeze(0).unsqueeze(0)           # [1, 1, ratio, D]
         dn_expanded = dn_expanded + pos_emb
-        out = dn_expanded.view(dn_expanded.size(0), -1, self.d_model)
-        return out[:, :x.shape[1], :]
+        out = dn_expanded.view(dn_expanded.size(0), -1, self.d_model)[:, :x.shape[1], :]
+
+        # out = out + self.res_proj(x)
+        # out = out + self.res_norm(x)
+        return out
 
         
         # out = self.out_proj(dn)  # [B, n_blocks, D * ratio]
@@ -186,6 +279,7 @@ class MultiHeadCLA(nn.Module):
             num_heads: int,
             use_sliding: bool = False,
             compress_ratios: List[int] = [2, 4],
+            overlap: bool = False,
             window_size: int = 32,
             delta_net_kwargs: dict = None,
             fusion: str = 'sum',   # 'sum', 'learned_sum', 'concat'
@@ -214,7 +308,7 @@ class MultiHeadCLA(nn.Module):
                     d_model=d_model,
                     head_dim=self.head_dim,
                     compress_ratio=ratio,
-                    overlap=True   # ratio<=4 时自动启用重叠窗口
+                    overlap=overlap,
                 )
             )
             self.block_projs.append(nn.Linear(self.head_dim, d_model))
