@@ -127,12 +127,13 @@ class GatedPoolExpander(nn.Module):
         coff = 2 if self.overlap else 1
         self.coff = coff
 
-        # Linear layers to produce raw expansion features and gating logits
-        self.wexpand = nn.Linear(d_model, coff * expand_ratio * d_model, bias=False)
-        self.wgate = nn.Linear(d_model, coff * expand_ratio * d_model, bias=False)
         # Learnable bias for each expanded position (shared across all tokens)
         self.ape = nn.Parameter(torch.empty(coff * expand_ratio, d_model))
         nn.init.normal_(self.ape, mean=0.0, std=0.02)
+
+        # learnable base weight + temperature (mirrors GatedPoolCompressor)
+        self.base_weight = nn.Parameter(torch.ones(coff * expand_ratio, 1) / (coff * expand_ratio))
+        self.tau = nn.Parameter(torch.ones(1) * 2.0)
 
     def _overlap_combine(self, x: torch.Tensor):
         """
@@ -164,27 +165,20 @@ class GatedPoolExpander(nn.Module):
         ratio = self.expand_ratio
         coff = self.coff
 
-        # Project to raw expansion and gates
-        expand = self.wexpand(x)                # [B, S, coff*ratio*D]
-        gate = self.wgate(x)                    # [B, S, coff*ratio*D]
+        # Project to raw expansion and gates (fused)
+        expand = self.wexpand(x).view(B, S, coff * ratio, D)       # [B, S, coff*R, D]
+        raw_gate = self.wgate(x).view(B, S, coff * ratio, D)       # [B, S, coff*R, D]
 
-        # Reshape to separate the expansion dimension
-        expand = expand.view(B, S, coff * ratio, D)
-        gate = gate.view(B, S, coff * ratio, D)
-
-        # Add learnable bias to gates
-        gate = gate + self.ape.view(1, 1, -1, D)
-
-        # Sigmoid to produce weights in (0,1)
-        gate = torch.sigmoid(gate)
-
-        # Gated expansion
-        out = expand * gate                     # [B, S, coff*ratio, D]
+        # Gating: base_weight + (raw_gate + ape) / tau  → sigmoid
+        base = self.base_weight.view(1, 1, coff * ratio, 1)
+        gate = torch.sigmoid(
+            base + (raw_gate + self.ape.view(1, 1, coff * ratio, D)) / self.tau
+        )
+        out = expand * gate                                         # [B, S, coff*R, D]
 
         if self.overlap:
             out = self._overlap_combine(out)    # [B, S*ratio, D]
         else:
-            # No overlap: simply flatten
             out = out.view(B, -1, D)            # [B, S*ratio, D]
 
         return out
@@ -215,52 +209,56 @@ class CompressedLinearAttention(nn.Module):
             compress_ratio=compress_ratio,
             overlap=overlap,
         )
-        self.block_proj = nn.Linear(self.head_dim, d_model)
-        self.delta_net = DeltaNet(d_model=self.head_dim, **delta_net_kwargs)
-        self.out_proj = nn.Linear(d_model, d_model * compress_ratio)
-        self.block_pos_emb = nn.Embedding(compress_ratio, d_model)
+        # project compressed head_dim → d_model before DeltaNet
+        self.pre_proj = nn.Linear(self.head_dim, d_model, bias=False)
+        # DeltaNet operates at full d_model — state capacity matches baseline
+        delta_net_kwargs = delta_net_kwargs or {}
+        self.delta_net = DeltaNet(d_model=d_model, **delta_net_kwargs)
 
-        self.res_proj = nn.Linear(d_model, d_model)
-        self.res_norm = nn.RMSNorm(d_model)
+        # skip connection: lightweight MLP processes per-token residual
+        # (token - block_center) that was lost during R→1 compression.
+        # zero-init → at init output = 0, behaving exactly like repeat baseline.
+        self.skip_mlp = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Linear(64, d_model),
+        )
+        nn.init.zeros_(self.skip_mlp[-1].weight)
+        nn.init.zeros_(self.skip_mlp[-1].bias)
 
     def forward(self, x):
         # x: [B, S, D]
+        B, S, D = x.shape
+        R = self.compress_ratio
+
         if self.use_sliding:
             x = self.sliding_attn(x) + x  # residual
 
-        compressed = self.compressor(x) # [B, n_blocks, head_dim]
-        # 投影回 d_model
-        # compressed = self.block_proj(compressed) # [B, n_blocks, D]
-        # DeltaNet 处理压缩序列
-        dn = self.delta_net(compressed)         # [B, n_blocks, head_dim]
+        # pad to multiple of R (matching compressor's internal padding)
+        remainder = S % R
+        pad_len = (R - remainder) % R
+        if pad_len > 0:
+            x_padded = F.pad(x, (0, 0, 0, pad_len))
+        else:
+            x_padded = x
+        x_blocks = x_padded.view(B, -1, R, D)          # [B, n_blocks, R, D]
 
-        dn = self.block_proj(dn)         # [B, n_blocks, D]
-        # 将输出上采样回原始长度
-        dn_expanded = dn.unsqueeze(2).expand(-1, -1, self.compress_ratio, -1)  # [B, n_blocks, ratio, D]
-        pos_emb = self.block_pos_emb.weight.unsqueeze(0).unsqueeze(0)           # [1, 1, ratio, D]
-        dn_expanded = dn_expanded + pos_emb
-        out = dn_expanded.view(dn_expanded.size(0), -1, self.d_model)[:, :x.shape[1], :]
+        compressed = self.compressor(x)                 # [B, n_blocks, head_dim]
+        # project to d_model — this is the "block center"
+        dn_input = self.pre_proj(compressed)            # [B, n_blocks, D]
+        dn = self.delta_net(dn_input)                   # [B, n_blocks, D]
 
-        # out = out + self.res_proj(x)
-        # out = out + self.res_norm(x)
+        # Path 1: repeat baseline (shared block center)
+        base = dn.unsqueeze(2).expand(-1, -1, R, -1)   # [B, n_blocks, R, D]
+
+        # Path 2: skip connection — residual from pre-compression tokens
+        # r_i = token_i - block_center → captures info lost in pooling
+        center = dn_input.unsqueeze(2)                  # [B, n_blocks, 1, D]
+        residual = x_blocks - center                    # [B, n_blocks, R, D]
+        skip_info = self.skip_mlp(residual)             # [B, n_blocks, R, D]
+
+        out = (base + skip_info).view(B, -1, D)[:, :S, :]
         return out
-
-        
-        # out = self.out_proj(dn)  # [B, n_blocks, D * ratio]
-        # out = out.view(out.size(0), -1, self.d_model)  # [B, n_blocks * ratio, D]
-        # return out[:, :x.shape[1], :]
-
-        # # 压缩时
-        # mean = kv.mean(dim=2)                # [B, n_blocks, head_dim]
-        # residual = kv[:, :, 0, :] - mean     # 取第一个 token 与均值的差
-        # # 将 mean 和 residual 拼接后投影到 d_model（或分别处理）
-        # compressed = torch.cat([mean, residual], dim=-1)  # [B, n_blocks, 2*head_dim]
-        # compressed = self.block_proj(compressed)          # -> [B, n_blocks, d_model]
-        # # DeltaNet 处理...
-        # # 上采样时，将 DeltaNet 输出再拆分为 mean' 和 residual'，然后重建
-        # mean_out, residual_out = dn.chunk(2, dim=-1)
-        # reconstructed = mean_out.unsqueeze(2) + residual_out.unsqueeze(2)  # 简单重建
-        # reconstructed = torch.cat([reconstructed, ...], dim=2)   # 需要恢复 ratio 个 token
 
     # ------------------------------------------------------------------
     def state_size(self, sequence_length: int = 2048) -> int:
@@ -269,6 +267,105 @@ class CompressedLinearAttention(nn.Module):
         Returns:
             State size = delta_net.state_size
         """
+        return self.delta_net.state_size(sequence_length)
+
+
+class ExpandLinearAttention(nn.Module):
+    """
+    Expands sequence length, processes with DeltaNet, then folds back.
+
+    Flow::
+
+        x → [optional SlidingAttn] → GatedPoolExpander → DeltaNet
+          → reshape (concat over R) → out_proj
+
+    **Rationale.**  The original ``CompressedLinearAttention`` reduces sequence
+    length *before* DeltaNet, creating an information bottleneck that hurts
+    length generalisation.  This module does the opposite: it uses
+    :class:`GatedPoolExpander` to produce ``expand_ratio`` sub-tokens from each
+    input token via learned gated projections.  DeltaNet therefore has *more*
+    recurrent updates — and thus more capacity to encode the input — without
+    any lossy front-end compression.
+
+    After DeltaNet, the expanded outputs **are not pooled** (no avg/last/gated
+    selection that would discard information).  Instead, the ``R`` outputs per
+    group are **concatenated** along the feature dimension (``R·D``) and then
+    linearly projected back to ``D``.  This preserves all the fine-grained
+    information that DeltaNet produced, at the cost of a slightly larger
+    projection matrix.
+
+    Args:
+        d_model: input/output feature dimension.
+        num_heads: number of attention heads (used for DeltaNet).
+        expand_ratio: factor by which to expand the sequence length.
+        overlap: whether to use overlapping expansion windows.
+        use_sliding: if True, apply a sliding-window attention as a
+            preprocessing step.
+        window_size: sliding-window size.
+        delta_net_kwargs: keyword arguments forwarded to :class:`DeltaNet`.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        expand_ratio: int = 2,
+        overlap: bool = False,
+        use_sliding: bool = False,
+        window_size: int = 32,
+        delta_net_kwargs: dict = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.expand_ratio = expand_ratio
+        self.use_sliding = use_sliding
+
+        # optional sliding-window preprocessing
+        if use_sliding:
+            self.sliding_attn = SlidingAttn(d_model, block_size=window_size)
+        else:
+            self.sliding_attn = None
+
+        # gated expander
+        self.expander = GatedPoolExpander(
+            d_model=d_model,
+            expand_ratio=expand_ratio,
+            overlap=overlap,
+        )
+
+        # DeltaNet — operates at full d_model (no head_dim bottleneck)
+        delta_net_kwargs = delta_net_kwargs or {}
+        delta_net_kwargs.setdefault('num_heads', num_heads)
+        self.delta_net = DeltaNet(d_model=d_model, **delta_net_kwargs)
+
+        # Concat-and-project: preserve all R×D dimensions → learn projection to D
+        self.out_proj = nn.Linear(expand_ratio * d_model, d_model, bias=False)
+
+    # ------------------------------------------------------------------
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, S, D]  ->  out: [B, S, D]"""
+        B, S, D = x.shape
+        R = self.expand_ratio
+
+        if self.use_sliding and self.sliding_attn is not None:
+            x = self.sliding_attn(x) + x
+
+        # 1) expand: [B, S, D] -> [B, S*R, D]
+        expanded = self.expander(x)
+
+        # 2) DeltaNet processes the longer sequence
+        dn_out = self.delta_net(expanded)               # [B, S*R, D]
+
+        # 3) concat over R → project back to D  (no information loss)
+        dn_out = dn_out[:, :S * R, :]                   # safety trim
+        out = dn_out.view(B, S, R * D)                  # [B, S, R*D]
+        out = self.out_proj(out)                        # [B, S, D]
+
+        return out
+
+    # ------------------------------------------------------------------
+    def state_size(self, sequence_length: int = 2048) -> int:
         return self.delta_net.state_size(sequence_length)
 
 
@@ -373,6 +470,87 @@ class MultiHeadCLA(nn.Module):
         return self.delta_net.state_size(sequence_length)
 
 
+# ---------------------------------------------------------------------------
+# Multi-scale DeltaNet — parallel states at different feature resolutions
+# ---------------------------------------------------------------------------
+class MultiScaleDeltaNet(nn.Module):
+    """
+    Multi-scale DeltaNet with auxiliary low-dimensional state.
+
+    Rationale
+    ---------
+    DeepSeek-V4's CSA augments softmax attention by providing *additional*
+    compressed KV positions for the query to attend to.  Linear attention
+    (DeltaNet) cannot do this — its Q/K/V must be length-aligned.  The
+    analogous operation in feature-space is to provide *additional* state
+    capacity at a reduced feature resolution:
+
+        main:  S_main ∈ R^{D×D}          (full resolution, per token)
+        aux:   S_aux  ∈ R^{D/R × D/R}    (compressed, per token)
+
+    Each token updates **both** states.  The aux state has (1/R²) the
+    capacity of the main state, but it processes the same S tokens —
+    capturing lower-rank / coarser structure that complements the main
+    state's fine-grained representation.
+
+    Flow
+    ----
+        x ──→ main DeltaNet ──→ o_main ─┐
+          └→ down_proj → aux DeltaNet → up_proj(aux) → + → output
+
+    Args:
+        d_model: input/output feature dimension.
+        num_heads: number of attention heads for the *main* DeltaNet.
+        scale_ratio: feature-dim compression ratio for the auxiliary state.
+        delta_net_kwargs: keyword arguments forwarded to **both** DeltaNets.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        scale_ratio: int = 2,
+        **kwargs,  # forwarded to BOTH DeltaNets
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.scale_ratio = scale_ratio
+
+        # main state — full resolution
+        self.main_net = DeltaNet(d_model=d_model, num_heads=num_heads, **kwargs)
+
+        # aux state — compressed feature dimension
+        aux_d_model = d_model // scale_ratio
+        aux_num_heads = max(1, num_heads // scale_ratio)
+
+        self.aux_down = nn.Linear(d_model, aux_d_model, bias=False)
+        self.aux_net = DeltaNet(d_model=aux_d_model, num_heads=aux_num_heads, **kwargs)
+        self.aux_up = nn.Linear(aux_d_model, d_model, bias=False)
+
+        # zero-init aux_up → at init, aux path contributes nothing
+        nn.init.zeros_(self.aux_up.weight)
+
+    # ------------------------------------------------------------------
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, S, D]  ->  out: [B, S, D]"""
+        # main: full-resolution processing
+        o_main = self.main_net(x)         # [B, S, D]
+
+        # aux: compress → DeltaNet → expand
+        aux_x = self.aux_down(x)          # [B, S, D/R]
+        o_aux = self.aux_net(aux_x)       # [B, S, D/R]
+        o_aux = self.aux_up(o_aux)        # [B, S, D]
+
+        return o_main + o_aux
+
+    # ------------------------------------------------------------------
+    def state_size(self, sequence_length: int = 2048) -> int:
+        return (
+            self.main_net.state_size(sequence_length)
+            + self.aux_net.state_size(sequence_length)
+        )
+
+
 if __name__ == "__main__":
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -385,8 +563,8 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 64                # 序列长度（能被 compress_ratio 整除）
 
-    # DeltaNet 参数（轻量设置）
-    kwargs = {
+    # DeltaNet 参数（轻量设置）— 移除 num_heads 以避免与顶层参数冲突
+    delta_kwargs = {
         "expand_k": 1.0,
         "expand_v": 1.0,
         "num_heads": 4,
@@ -407,7 +585,7 @@ if __name__ == "__main__":
         num_heads=num_heads,
         compress_ratio=compress_ratio,
         window_size=window_size,
-        **kwargs,
+        delta_net_kwargs=delta_kwargs,
     ).to(device)
     model.train()   # 启用 dropout 等
 
@@ -427,7 +605,7 @@ if __name__ == "__main__":
     loss = model(x_grad).sum()
     loss.backward()
     # 检查关键参数梯度是否存在
-    assert model.block_proj.weight.grad is not None, "block_proj weight gradient missing"
+    assert model.pre_proj.weight.grad is not None, "pre_proj weight gradient missing"
     assert model.delta_net.q_proj.weight.grad is not None, "DeltaNet q_proj gradient missing"
     print("[Gradient] Passed")
 
@@ -446,3 +624,58 @@ if __name__ == "__main__":
     print(f"[Irregular length {seq_len_irregular}] Output shape correct")
 
     print("All tests passed for CompressedLinearAttention.")
+
+    # ------------------------------------------------------------------
+    # Tests for ExpandLinearAttention
+    # ------------------------------------------------------------------
+    print("\n--- Testing ExpandLinearAttention (concat+project) ---")
+    expand_ratio = 2
+
+    model_ela = ExpandLinearAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        expand_ratio=expand_ratio,
+        overlap=False,
+        use_sliding=False,
+        delta_net_kwargs=delta_kwargs,
+    ).to(device)
+
+    # 1. Shape test
+    out_ela = model_ela(x)
+    print(f"  [Shape] {out_ela.shape}, expected ({batch_size}, {seq_len}, {d_model})")
+    assert out_ela.shape == (batch_size, seq_len, d_model), f"Shape mismatch: {out_ela.shape}"
+
+    # 2. Numerical stability
+    assert torch.isfinite(out_ela).all(), "Output contains NaN or Inf"
+    print("  [Finite] OK")
+
+    # 3. Gradient test
+    x_grad_ela = torch.randn(batch_size, seq_len, d_model, device=device, requires_grad=True)
+    loss_ela = model_ela(x_grad_ela).sum()
+    loss_ela.backward()
+    assert model_ela.delta_net.q_proj.weight.grad is not None, "DeltaNet q_proj gradient missing"
+    assert model_ela.expander.wexpand.weight.grad is not None, "Expander wexpand gradient missing"
+    assert model_ela.out_proj.weight.grad is not None, "out_proj gradient missing"
+    print("  [Gradient] OK")
+
+    # 4. Irregular lengths (not a multiple of expand_ratio)
+    seq_len2 = 63
+    x2 = torch.randn(batch_size, seq_len2, d_model, device=device)
+    out2 = model_ela(x2)
+    assert out2.shape == (batch_size, seq_len2, d_model), f"Irregular shape: {out2.shape}"
+    print(f"  [Irregular {seq_len2}] OK")
+
+    # 5. Overlap mode
+    model_ela_overlap = ExpandLinearAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        expand_ratio=2,
+        overlap=True,
+        delta_net_kwargs=delta_kwargs,
+    ).to(device)
+    out_overlap = model_ela_overlap(x)
+    assert out_overlap.shape == (batch_size, seq_len, d_model), f"Overlap shape: {out_overlap.shape}"
+    assert torch.isfinite(out_overlap).all(), "Overlap output NaN/Inf"
+    print("  [Overlap] OK")
+
+    print("All tests passed for ExpandLinearAttention.")

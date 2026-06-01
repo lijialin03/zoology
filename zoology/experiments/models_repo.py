@@ -585,6 +585,46 @@ def add_cla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
     return models
 
 
+# ELA (Expanded Linear Attention)
+def add_ela(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    block_type = "TransformerBlock"
+    for d_model in [64, 128, 256]:
+        ela_mixer = dict(
+            name="zoology.mixers.cla.ExpandLinearAttention",
+            kwargs={
+                "num_heads": 2,
+                "window_size": 8,
+                "expand_ratio": 2,
+                "overlap": True,
+                "use_sliding": False,
+                "delta_net_kwargs":{
+                    "l_max": input_seq_len,
+                    "num_heads": 2,         # Tune
+                    "use_beta": True,       # Tune
+                    "use_gate": False,      # Tune
+                    "use_short_conv": True, # Tune
+                    "conv_size": 4
+                }
+            }
+        )
+        mixers = [conv_mixer, ela_mixer, ela_mixer] if conv_mixer is not None else [ela_mixer, ela_mixer ]
+        mixer = ModuleConfig(
+            name="zoology.mixers.hybrid.Hybrid",
+            kwargs={"configs": mixers}
+        )
+        model = ModelConfig(
+            block_type=block_type,
+            d_model=d_model,
+            n_layers=num_layers,
+            sequence_mixer=mixer,
+            max_position_embeddings=0,
+            name="ela",
+            **model_factory_kwargs
+        )
+        models.append(model)
+    return models
+
+
 # MHCLA (Multi-Head Compressed Linear Attention)
 def add_mhcla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
     block_type = "TransformerBlock"
@@ -622,6 +662,40 @@ def add_mhcla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
             **model_factory_kwargs
         )
         models.append(model)
+    return models
+
+# MSD (Multi-scale DeltaNet)
+def add_msd(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    block_type = "TransformerBlock"
+    for scale_ratio in [2, 4]:
+        for d_model in [64, 128, 256]:
+            msd_mixer = dict(
+                name="zoology.mixers.cla.MultiScaleDeltaNet",
+                kwargs={
+                    "num_heads": 2,
+                    "scale_ratio": scale_ratio,
+                    "l_max": input_seq_len,
+                    "use_beta": True,
+                    "use_gate": False,
+                    "use_short_conv": True,
+                    "conv_size": 4,
+                }
+            )
+            mixers = [conv_mixer, msd_mixer, msd_mixer] if conv_mixer is not None else [msd_mixer, msd_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=f"msd_r{scale_ratio}",
+                **model_factory_kwargs
+            )
+            models.append(model)
     return models
 
 
