@@ -58,8 +58,8 @@ conv_mixer = dict(
 
 
 from zoology.experiments.models_repo_fix_d import (
-    add_attention, add_sliding_window,add_based, add_mamba2, add_rwkv7, 
-    add_delta_net, add_gla, add_gated_delta_net, add_deepseek_nsa, add_ttt
+    add_attention, add_sliding_window,add_based, add_mamba2, add_rwkv7,
+    add_delta_net, add_gla, add_gated_delta_net, add_deepseek_nsa, add_ttt, add_msgla
 )
 
 models = add_attention(models, conv_mixer, input_seq_len, model_factory_kwargs)
@@ -69,20 +69,22 @@ models = add_sliding_window(models, conv_mixer, input_seq_len, model_factory_kwa
 models = add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_rwkv7(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs)
+models = add_msgla(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_gated_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs)
 models = add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs)
 
 # convenience for filtering out 
 included = [
-    "attention", 
-    # "sliding-window", 
-    "based", 
-    "delta_net", 
-    "gla", 
-    "gated_delta_net", 
-    "deepseek_nsa", 
-    # "ttt_linear", 
+    "attention",
+    # "sliding-window",
+    "based",
+    "delta_net",
+    "gla",
+    "msgla",
+    "gated_delta_net",
+    "deepseek_nsa",
+    # "ttt_linear",
     # "ttt_mlp",
 ]
 models = [m for m in models if any([i in m.name for i in included])]

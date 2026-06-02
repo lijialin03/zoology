@@ -298,7 +298,8 @@ def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
             name="zoology.mixers.gla.GatedLinearAttention",
             kwargs={
                 "num_heads": 2,          # Tune
-                "use_short_conv": False, # Tune (False default)
+                "expand_k": 1.0,         # Match DeltaNet/MS-GLA default
+                "use_short_conv": False,
             }
         )
         mixers = [conv_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer]
@@ -385,6 +386,39 @@ def add_ttt(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
                     **model_factory_kwargs
                 )
                 models.append(model)
+    return models
+
+
+def add_msgla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2, d_models=None):
+    block_type = "TransformerBlock"
+    if d_models is None:
+        d_models = [64, 128, 256]
+    for scale_ratio in [2, 4, 8]:
+        for d_model in d_models:
+            msgla_mixer = dict(
+                name="zoology.mixers.ms_gla.MultiScaleGLA",
+                kwargs={
+                    "num_heads": 2,
+                    "scale_ratio": scale_ratio,
+                    "l_max": input_seq_len,
+                    "use_output_gate": True,
+                }
+            )
+            mixers = [conv_mixer, msgla_mixer] if conv_mixer is not None else [msgla_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=f"msgla_r{scale_ratio}",
+                **model_factory_kwargs
+            )
+            models.append(model)
     return models
 
 

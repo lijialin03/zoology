@@ -243,7 +243,7 @@ def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_l
                 "conv_size": 4
             }
         )
-        mixers = [conv_mixer, delta_net_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer, delta_net_mixer]
+        mixers = [conv_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer]
         mixer = ModuleConfig(
             name="zoology.mixers.hybrid.Hybrid",
             kwargs={"configs": mixers}
@@ -301,7 +301,8 @@ def add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
             name="zoology.mixers.gla.GatedLinearAttention",
             kwargs={
                 "num_heads": 2,          # Tune
-                "use_short_conv": False, # Tune (False default)
+                "expand_k": 1.25,         # Match DeltaNet/MS-GLA default
+                "use_short_conv": False,
             }
         )
         mixers = [conv_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer]
@@ -664,24 +665,24 @@ def add_mhcla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
         models.append(model)
     return models
 
-# MSD (Multi-scale DeltaNet)
-def add_msd(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+
+# MSGLA (Multi-scale GLA — augmented single-state, GLA-based)
+def add_msgla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
     block_type = "TransformerBlock"
-    for scale_ratio in [2, 4]:
+    # for scale_ratio in [2, 4, 8]:
+    for scale_ratio in [4]:
         for d_model in [64, 128, 256]:
-            msd_mixer = dict(
-                name="zoology.mixers.cla.MultiScaleDeltaNet",
+            msgla_mixer = dict(
+                name="zoology.mixers.ms_gla.MultiScaleGLA",
                 kwargs={
                     "num_heads": 2,
                     "scale_ratio": scale_ratio,
                     "l_max": input_seq_len,
-                    "use_beta": True,
-                    "use_gate": False,
-                    "use_short_conv": True,
-                    "conv_size": 4,
+                    "use_output_gate": True,
                 }
             )
-            mixers = [conv_mixer, msd_mixer, msd_mixer] if conv_mixer is not None else [msd_mixer, msd_mixer]
+            # Same pattern as add_gla — 1 mixer per layer w/o conv, hybrid w/ conv
+            mixers = [conv_mixer, msgla_mixer] if conv_mixer is not None else [msgla_mixer]
             mixer = ModuleConfig(
                 name="zoology.mixers.hybrid.Hybrid",
                 kwargs={"configs": mixers}
@@ -692,7 +693,7 @@ def add_msd(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=
                 n_layers=num_layers,
                 sequence_mixer=mixer,
                 max_position_embeddings=0,
-                name=f"msd_r{scale_ratio}",
+                name=f"msgla_r{scale_ratio}",
                 **model_factory_kwargs
             )
             models.append(model)
