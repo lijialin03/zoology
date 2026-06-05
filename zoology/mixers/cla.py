@@ -30,7 +30,7 @@ from zoology.mixers.slide_attn import SlidingAttn
 # gated-pooling compressor
 # ---------------------------------------------------------------------------
 
-class GatedPoolCompressor(nn.Module):
+class LenGatedPoolCompressor(nn.Module):
     """Compresses a sequence via learned gated pooling over ``compress_ratio``
     consecutive tokens.
 
@@ -106,10 +106,10 @@ class GatedPoolCompressor(nn.Module):
         return kv
 
 
-class GatedPoolExpander(nn.Module):
+class LenGatedPoolExpander(nn.Module):
     """
     Expands sequence length by factor `expand_ratio` using gated linear projection.
-    Designed as the inverse of GatedPoolCompressor.
+    Designed as the inverse of LenGatedPoolCompressor.
 
     When overlap=True (and expand_ratio <= 4), each input token produces both a normal
     window and an overlapping window. The overlapping window is shifted right and added
@@ -131,7 +131,7 @@ class GatedPoolExpander(nn.Module):
         self.ape = nn.Parameter(torch.empty(coff * expand_ratio, d_model))
         nn.init.normal_(self.ape, mean=0.0, std=0.02)
 
-        # learnable base weight + temperature (mirrors GatedPoolCompressor)
+        # learnable base weight + temperature (mirrors LenGatedPoolCompressor)
         self.base_weight = nn.Parameter(torch.ones(coff * expand_ratio, 1) / (coff * expand_ratio))
         self.tau = nn.Parameter(torch.ones(1) * 2.0)
 
@@ -203,7 +203,7 @@ class CompressedLinearAttention(nn.Module):
         self.compress_ratio = compress_ratio
 
         self.sliding_attn = SlidingAttn(d_model, block_size=window_size)
-        self.compressor = GatedPoolCompressor(
+        self.compressor = LenGatedPoolCompressor(
             d_model=d_model,
             head_dim=self.head_dim,
             compress_ratio=compress_ratio,
@@ -276,13 +276,13 @@ class ExpandLinearAttention(nn.Module):
 
     Flow::
 
-        x → [optional SlidingAttn] → GatedPoolExpander → DeltaNet
+        x → [optional SlidingAttn] → LenGatedPoolExpander → DeltaNet
           → reshape (concat over R) → out_proj
 
     **Rationale.**  The original ``CompressedLinearAttention`` reduces sequence
     length *before* DeltaNet, creating an information bottleneck that hurts
     length generalisation.  This module does the opposite: it uses
-    :class:`GatedPoolExpander` to produce ``expand_ratio`` sub-tokens from each
+    :class:`LenGatedPoolExpander` to produce ``expand_ratio`` sub-tokens from each
     input token via learned gated projections.  DeltaNet therefore has *more*
     recurrent updates — and thus more capacity to encode the input — without
     any lossy front-end compression.
@@ -328,7 +328,7 @@ class ExpandLinearAttention(nn.Module):
             self.sliding_attn = None
 
         # gated expander
-        self.expander = GatedPoolExpander(
+        self.expander = LenGatedPoolExpander(
             d_model=d_model,
             expand_ratio=expand_ratio,
             overlap=overlap,
@@ -401,7 +401,7 @@ class MultiHeadCLA(nn.Module):
 
         for ratio in compress_ratios:
             self.compressors.append(
-                GatedPoolCompressor(
+                LenGatedPoolCompressor(
                     d_model=d_model,
                     head_dim=self.head_dim,
                     compress_ratio=ratio,
@@ -471,9 +471,9 @@ class MultiHeadCLA(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Multi-scale DeltaNet — parallel states at different feature resolutions
+# Old version of Multi-scale DeltaNet — parallel states at different feature resolutions
 # ---------------------------------------------------------------------------
-class MultiScaleDeltaNet(nn.Module):
+class OldMultiScaleDeltaNet(nn.Module):
     """
     Multi-scale DeltaNet with auxiliary low-dimensional state.
 

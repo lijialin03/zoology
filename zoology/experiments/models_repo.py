@@ -240,7 +240,7 @@ def add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_l
                 "use_beta": True,       # Tune
                 "use_gate": False,      # Tune
                 "use_short_conv": True, # Tune
-                "conv_size": 4
+                "conv_size": 4,
             }
         )
         mixers = [conv_mixer, delta_net_mixer] if conv_mixer is not None else [delta_net_mixer]
@@ -697,6 +697,125 @@ def add_msgla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layer
                 **model_factory_kwargs
             )
             models.append(model)
+    return models
+
+
+# MS-DeltaNet (compressor+concat on DeltaNet)
+def add_ms_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    block_type = "TransformerBlock"
+    for scale_ratio in [4]:
+        for d_model in [64, 128, 256]:
+            msdn_mixer = dict(
+                name="zoology.mixers.ms_dn.MultiScaleDeltaNet",
+                kwargs={
+                    "num_heads": 2,
+                    "scale_ratio": scale_ratio,
+                    "use_beta": True,
+                    "use_gate": False,
+                    "use_short_conv": False,
+                    "conv_size": 4,
+                }
+            )
+            mixers = [conv_mixer, msdn_mixer] if conv_mixer is not None else [msdn_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=f"ms_dn_r{scale_ratio}",
+                **model_factory_kwargs
+            )
+            models.append(model)
+    return models
+
+
+def add_ms_la(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    """
+    Multi-Scale Linear Attention: DeltaNet (main) + L-axis compressed DeltaNet (aux).
+    """
+    block_type = "TransformerBlock"
+    for scale_ratio in [8]:
+        for d_model in [64, 128, 256]:
+            msla_mixer = dict(
+                name="zoology.mixers.ms_la.MultiScaleLinearAttention",
+                kwargs={
+                    "num_heads": 2,
+                    "scale_ratio": scale_ratio,
+                    "use_beta": True,
+                    "use_gate": False,
+                    "use_short_conv": False,
+                    "conv_size": 4,
+                }
+            )
+            mixers = [conv_mixer, msla_mixer] if conv_mixer is not None else [msla_mixer]
+            mixer = ModuleConfig(
+                name="zoology.mixers.hybrid.Hybrid",
+                kwargs={"configs": mixers}
+            )
+            model = ModelConfig(
+                block_type=block_type,
+                d_model=d_model,
+                n_layers=num_layers,
+                sequence_mixer=mixer,
+                max_position_embeddings=0,
+                name=f"ms_la_r{scale_ratio}",
+                **model_factory_kwargs
+            )
+            models.append(model)
+    return models
+
+
+# Dual-State DeltaNet (main per-token + aux L-axis compressed writes)
+def add_dual_state_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2):
+    """
+    Dual-State DeltaNet: main state (per-token) + aux state (per-block compressed writes).
+
+    L-axis compression via LenGatedPoolCompressor applied ONLY to the write side
+    of the aux state. Read side maintains full temporal resolution.
+
+    Separately sweeps:
+      - scale_ratio (r): L-axis compression (write frequency)
+      - feature_ratio (f): D-axis compression (aux state capacity)
+    """
+    block_type = "TransformerBlock"
+    for scale_ratio in [8]:
+        for feature_ratio in [1, 4]:
+            for d_model in [64, 128, 256]:
+                dsd_mixer = dict(
+                    name="zoology.mixers.dual_state_delta_net.DualStateDeltaNet",
+                    kwargs={
+                        "num_heads": 2,
+                        "scale_ratio": scale_ratio,
+                        "feature_ratio": feature_ratio,
+                        "use_beta": True,
+                        "use_gate": False,
+                        "use_short_conv": True,
+                        "conv_size": 4,
+                    }
+                )
+                mixers = [conv_mixer, dsd_mixer] if conv_mixer is not None else [dsd_mixer]
+                mixer = ModuleConfig(
+                    name="zoology.mixers.hybrid.Hybrid",
+                    kwargs={"configs": mixers}
+                )
+                tag = f"ds_dn_r{scale_ratio}"
+                if feature_ratio > 1:
+                    tag += f"_f{feature_ratio}"
+                model = ModelConfig(
+                    block_type=block_type,
+                    d_model=d_model,
+                    n_layers=num_layers,
+                    sequence_mixer=mixer,
+                    max_position_embeddings=0,
+                    name=tag,
+                    **model_factory_kwargs
+                )
+                models.append(model)
     return models
 
 

@@ -62,16 +62,18 @@ conv_mixer = dict(
 )
 
 from zoology.experiments.models_repo import (
-    add_deepseek_nsa, 
-    add_csa, 
-    add_hca, 
-    add_deepseek_csa_hca, 
-    add_cla, add_mhcla, 
-    add_delta_net, 
-    add_ela, 
-    add_msgla, 
+    add_deepseek_nsa,
+    add_csa,
+    add_hca,
+    add_deepseek_csa_hca,
+    add_cla, add_mhcla,
+    add_delta_net,
+    add_ela,
+    add_msgla,
     add_gla,
-    add_ms_delta_net
+    add_ms_delta_net,
+    add_ms_la,
+    add_dual_state_delta_net,
 )
 
 # models = add_deepseek_nsa(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=3)
@@ -83,10 +85,12 @@ from zoology.experiments.models_repo import (
 # models = add_ela(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=3)
 # models = add_mhcla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=3)
 
-models = add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
+# models = add_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
 # models = add_gla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
 # models = add_msgla(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
-models = add_ms_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
+# models = add_ms_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
+# models = add_ms_la(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
+models = add_dual_state_delta_net(models, conv_mixer, input_seq_len, model_factory_kwargs, num_layers=2)
 
 for model in models:
     model.embedding_init_type = "spherical"
@@ -99,11 +103,12 @@ for model in models:
 configs = []
 for model in models:
     # for lr in np.logspace(-3, -1.5, 4):
-    # for lr in np.logspace(-2.5, -2, 2):
+    # for lr in np.logspace(-3, -2.5, 2):
     # for lr in np.logspace(-2.5, -2.5, 1):
     for lr in [1.0e-3]:
         if model.d_model in [128, 256]:
             continue
+        model.name = f"{model.name}-ori"
         run_id = f"{model.name}-d{model.d_model}-lr{lr:.1e}"
         config = TrainConfig(
             model=model,

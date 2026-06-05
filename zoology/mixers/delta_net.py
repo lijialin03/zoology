@@ -147,11 +147,11 @@ class DeltaNet(nn.Module):
                 kernel_size=conv_size,
                 activation='silu'
             )
-        else:
-            raise UserWarning(
-                "ShortConvolution is crucial to the performance. "
-                "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
-            )
+        # else:
+        #     raise UserWarning(
+        #         "ShortConvolution is crucial to the performance. "
+        #         "Do not turn it off, i.e., setting `use_short_conv=False` unless you know what you are doing."
+        #     )
         if use_gate:
             self.g_proj = nn.Linear(hidden_size, self.value_dim, bias=False)
             self.o_norm = FusedRMSNormSwishGate(self.head_v_dim, eps=norm_eps)

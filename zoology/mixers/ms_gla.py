@@ -71,7 +71,7 @@ class DimGatedPoolCompressor(nn.Module):
         d_model: int,
         compress_ratio: int = 4,
         overlap: bool = False,
-        shuffle_groups: bool = True,
+        shuffle_groups: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
