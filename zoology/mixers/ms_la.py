@@ -1,34 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Multi-Scale Linear Attention (MSLA) — single-state with per-block compressed writes.
+Multi-Scale Linear Attention (MSLA) — single DeltaNet state with compressed
+per-block extra writes.
 
 Architecture
 ------------
-CSA 的核心是 Window KV + Compressed KV 提供不同 L 轴分辨率的视图:
-  - Window KV: 精细的逐 token 上下文
-  - Compressed KV: 粗粒度的全局上下文（L 轴压缩）
+Single DeltaNet state S ∈ R^{D_k × D_v} receives two types of writes:
 
-在线性注意力（DeltaNet）中, 在同一个状态上做两种粒度的写入:
-  S ∈ R^{D×D} (单个状态, state_size 与标准 DeltaNet 完全一致)
+  1. Per-token writes (standard DeltaNet) at every position t:
+       S += β[t] · k[t] ⊗ (v[t] - S @ k[t])
 
-  逐 token 写入 (main view, fine):
-    S += β · k ⊗ (v − S@k)
+  2. Compressed writes at each block boundary:
+       k̄, v̄ = LenGatedPoolCompressor(k_block, v_block)   ← L-axis pooling
+       S += β̄ · k̄ ⊗ (v̄ - S @ k̄)                          ← delta write
 
-  每 block 末额外写入 (compressed view, coarse):
-    k̄, v̄ = LenGatedPoolCompressor(k_block, v_block)  ← L 轴门控压缩
-    S += β̄ · k̄ ⊗ (v̄ − S@k̄)
+  Reads use the single state S at every position:
+       o[t] = S @ q[t]
 
-每个 token 的读取方式不变: o_t = S @ q_t
-
-核心机制: block 末的压缩写将当前 block 的粗粒度摘要注入 S,
-影响后续 token 的读取。 这样 S 同时包含逐 token 的精细信息和
-逐 block 的粗粒度信息, 形成多尺度时间感受野。
-
-优势:
-  - state_size 不变 (与标准 DeltaNet 相同), 公平对照
-  - 无 S_aux, 无额外 einsum 读取, 无 repeat_interleave
-  - 与 decode 阶段自然兼容: token 逐个到达, block 满时做一次额外写
-  - 行为类似 DeepSeek-V4 CSA 的 KV 缓存: 攒够 compress_ratio 个再压缩写入
+  Unlike CSA/HCA (where compressed KV is concatenated to the original KV
+  sequence for softmax attention), linear attention's recurrent state has
+  no "concatenation" concept — the compressed write injects coarse multi-
+  token information directly into the same state via the delta rule.
 
 When ``scale_ratio >= T``, no compressed writes are performed and the
 forward is bit-exact with a standard DeltaNet (same kernel dispatch, mode
@@ -100,6 +92,14 @@ class MultiScaleLinearAttention(nn.Module):
         use_short_conv (bool): Short conv. Default: ``True``.
         conv_size (int): Short conv kernel size. Default: ``4``.
         conv_bias (bool): Short conv bias. Default: ``False``.
+        compressed_beta_scale (float): Global multiplier for compressed beta.
+            Values < 1.0 dampen compressed writes, > 1.0 amplify them.
+            Setting to 0.0 disables compressed writes entirely (making MS-LA
+            effectively a standard DeltaNet). Default: ``1.0``.
+        use_compressed_gate (bool): Per-head learnable gate for compressed
+            writes. Adds ``num_heads`` extra parameters, initialized to 1.0
+            and sigmoid-constrained to (0, 1). Applied as:
+            ``beta_bar = beta_bar * g_bar.sigmoid()``. Default: ``False``.
         allow_neg_eigval (bool): Allow negative eigenvalues. Default: ``False``.
         layer_idx (int, optional): Layer index.
         norm_eps (float): RMSNorm epsilon. Default: ``1e-5``.
@@ -120,6 +120,8 @@ class MultiScaleLinearAttention(nn.Module):
         use_short_conv: bool = True,
         conv_size: int = 4,
         conv_bias: bool = False,
+        compressed_beta_scale: float = 1.0,
+        use_compressed_gate: bool = False,
         allow_neg_eigval: bool = False,
         layer_idx: int = None,
         qk_activation: str = 'silu',
@@ -142,6 +144,8 @@ class MultiScaleLinearAttention(nn.Module):
         self.expand_v = expand_v
         self.num_heads = num_heads
         self.scale_ratio = scale_ratio
+        self.compressed_beta_scale = compressed_beta_scale
+        self.use_compressed_gate = use_compressed_gate
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -210,6 +214,33 @@ class MultiScaleLinearAttention(nn.Module):
             compress_ratio=scale_ratio,
             overlap=False,
         )
+
+        # =====================================================================
+        # Compressed write gate/scale — explicit control over the strength of
+        # per-block compressed writes into the recurrent state.
+        #
+        # compressed_beta_scale (float):
+        #   A constant multiplier applied to the compressed beta (averaged over
+        #   the block). Values < 1.0 dampen compressed writes; > 1.0 amplify
+        #   them. Setting to 0.0 disables compressed writes entirely, making
+        #   MS-LA bit-exact with DeltaNet even when scale_ratio < T.
+        #
+        # use_compressed_gate (bool):
+        #   When True, introduces a learnable per-head gate g_bar ∈ R^H,
+        #   initialized to 1.0, applied as:
+        #       beta_bar = beta_bar * g_bar.sigmoid()
+        #   The sigmoid constrains the gate to (0, 1), and the 1.0 init
+        #   means it starts from "no modification" and gradually adjusts.
+        #   The gate is a single scalar per head (num_heads params total),
+        #   adding negligible parameter overhead.
+        # =====================================================================
+        if self.use_compressed_gate:
+            # Per-head learnable gate, init to 1.0 → sigmoid(1.0) ≈ 0.731
+            self.compressed_gate = nn.Parameter(
+                torch.ones(self.num_heads)
+            )
+        else:
+            self.compressed_gate = None
 
     # ======================================================================
     def forward(
@@ -298,10 +329,10 @@ class MultiScaleLinearAttention(nn.Module):
         cu_seqlens = kwargs.get('cu_seqlens', None)
 
         # =====================================================================
-        # 7. Main computation
+        # 7. Main computation — single-state DeltaNet with per-block compressed writes
         # =====================================================================
         if self.scale_ratio >= hidden_states.shape[1]:
-            # ── No compressed writes possible: behave exactly like DeltaNet ──
+            # ── No compressed writes: bit-exact with standard DeltaNet ──
             if mode == 'fused_recurrent':
                 o, recurrent_state = fused_recurrent_delta_rule(
                     q=q.to(torch.bfloat16),
@@ -330,71 +361,105 @@ class MultiScaleLinearAttention(nn.Module):
                 raise NotImplementedError(f"Not supported mode `{mode}`.")
             o = o.float()                                    # [B, T, H, D_v]
         else:
-            T = hidden_states.shape[1]
+            # ── Single state: per-token writes + per-block compressed writes ──
+            # Build an augmented sequence by inserting one compressed pseudo-token
+            # after each block. A single DeltaNet call then applies both normal
+            # token writes and compressed boundary writes in the same state.
+            if cu_seqlens is not None:
+                raise NotImplementedError(
+                    "MultiScaleLinearAttention augmented compressed path does not support cu_seqlens."
+                )
+
+            T, B = hidden_states.shape[1], hidden_states.shape[0]
             r = self.scale_ratio
-            # ── Block-by-block with compressed writes ──
+            device = q.device
             n_blocks = (T + r - 1) // r
-            outputs = []
+            T_aug = T + n_blocks
 
-            for b in range(n_blocks):
-                start = b * r
-                end = min((b + 1) * r, T)
+            # L-axis pooling → one compressed (k̄, v̄) per block.
+            k_flat = rearrange(k, 'b t h d -> b t (h d)')
+            v_flat = rearrange(v, 'b t h d -> b t (h d)')
+            k_bar = self.k_compress(k_flat)    # [B, N, key_dim]
+            v_bar = self.v_compress(v_flat)    # [B, N, value_dim]
+            k_bar = rearrange(k_bar, 'b n (h d) -> b n h d',
+                              h=self.num_heads, d=self.head_k_dim)
+            v_bar = rearrange(v_bar, 'b n (h d) -> b n h d',
+                              h=self.num_heads, d=self.head_v_dim)
 
-                q_block = q[:, start:end]                    # [B, len, H, D_k]
-                k_block = k[:, start:end]
-                v_block = v[:, start:end]
-                beta_block = beta[:, start:end]              # [B, len, H]
+            # Normalize k_bar for consistent delta writes.
+            if self.qk_norm == 'l2':
+                k_bar = F.normalize(k_bar.float(), p=2, dim=-1).to(k_bar.dtype)
+            elif self.qk_norm == 'sum':
+                k_bar = sum_norm(k_bar)
 
-                # (a) Per-token DeltaNet on this block
-                o_block, block_state = fused_recurrent_delta_rule(
-                    q=q_block.to(torch.bfloat16),
-                    k=k_block.to(torch.bfloat16),
-                    v=v_block.to(torch.bfloat16),
-                    beta=beta_block,
+            # Average beta over each block, matching the old per-block loop.
+            beta_padded = beta.new_zeros(B, n_blocks * r, self.num_heads)
+            beta_padded[:, :T] = beta
+            block_lens = torch.full((n_blocks,), r, device=device, dtype=beta.dtype)
+            block_lens[-1] = T - (n_blocks - 1) * r
+            beta_bar = beta_padded.view(B, n_blocks, r, self.num_heads).sum(dim=2)
+            beta_bar = beta_bar / block_lens.view(1, n_blocks, 1)
+
+            # Apply compressed write controls:
+            #   1. compressed_beta_scale: global strength multiplier
+            #   2. use_compressed_gate: per-head learnable gate (sigmoid-constrained to (0, 1))
+            if self.compressed_beta_scale != 1.0:
+                beta_bar = beta_bar * self.compressed_beta_scale
+            if self.use_compressed_gate and self.compressed_gate is not None:
+                beta_bar = beta_bar * self.compressed_gate.sigmoid()  # [H] broadcast over [B, N, H]
+
+            # Interleave real tokens and compressed pseudo-tokens:
+            #   real block b → positions [b*(r+1), ..., b*(r+1)+len-1]
+            #   compressed b → immediately after that block's last real token.
+            real_idx = torch.arange(T, device=device)
+            real_pos = real_idx + real_idx // r
+            block_idx = torch.arange(n_blocks, device=device)
+            block_ends = torch.clamp((block_idx + 1) * r, max=T)
+            compressed_pos = block_ends + block_idx
+
+            q_aug = q.new_zeros(B, T_aug, self.num_heads, self.head_k_dim)
+            k_aug = k.new_zeros(B, T_aug, self.num_heads, self.head_k_dim)
+            v_aug = v.new_zeros(B, T_aug, self.num_heads, self.head_v_dim)
+            beta_aug = beta.new_zeros(B, T_aug, self.num_heads)
+
+            q_aug[:, real_pos] = q
+            k_aug[:, real_pos] = k
+            v_aug[:, real_pos] = v
+            beta_aug[:, real_pos] = beta
+
+            # Pseudo-token outputs are discarded; q is set nonzero only to keep
+            # the kernel path numerically ordinary when q/k normalization is on.
+            q_aug[:, compressed_pos] = k_bar.to(q_aug.dtype)
+            k_aug[:, compressed_pos] = k_bar.to(k_aug.dtype)
+            v_aug[:, compressed_pos] = v_bar.to(v_aug.dtype)
+            beta_aug[:, compressed_pos] = beta_bar
+
+            if mode == 'fused_recurrent':
+                o_aug, recurrent_state = fused_recurrent_delta_rule(
+                    q=q_aug.to(torch.bfloat16),
+                    k=k_aug.to(torch.bfloat16),
+                    v=v_aug.to(torch.bfloat16),
+                    beta=beta_aug,
                     initial_state=recurrent_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=(self.qk_norm == 'l2')
+                    output_final_state=use_cache,
+                    cu_seqlens=None,
+                    use_qk_l2norm_in_kernel=(self.qk_norm == 'l2'),
                 )
-                outputs.append(o_block.float())              # [B, len, H, D_v]
-
-                # (b) Extra compressed write at block boundary
-                k_flat = rearrange(k_block, 'b t h d -> b t (h d)')
-                v_flat = rearrange(v_block, 'b t h d -> b t (h d)')
-
-                k_bar = self.k_compress(k_flat)              # [B, 1, key_dim]
-                v_bar = self.v_compress(v_flat)              # [B, 1, value_dim]
-
-                k_bar = rearrange(k_bar, 'b n (h d) -> b n h d',
-                                  h=self.num_heads, d=self.head_k_dim)
-                v_bar = rearrange(v_bar, 'b n (h d) -> b n h d',
-                                  h=self.num_heads, d=self.head_v_dim)
-
-                # Per-block beta: mean of per-token betas in this block
-                beta_bar = beta_block.mean(dim=1, keepdim=True)  # [B, 1, H]
-
-                # DeltaNet write+read on the same state using compressed (k̄, v̄)
-                # o_bar is the read output: state queried by compressed key
-                o_bar, block_state = fused_recurrent_delta_rule(
-                    q=k_bar.to(torch.bfloat16),
-                    k=k_bar.to(torch.bfloat16),
-                    v=v_bar.to(torch.bfloat16),
-                    beta=beta_bar,
-                    initial_state=block_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=(self.qk_norm == 'l2')
+            elif mode == 'chunk':
+                o_aug, recurrent_state = chunk_delta_rule(
+                    q=q_aug.to(torch.bfloat16),
+                    k=k_aug.to(torch.bfloat16),
+                    v=v_aug.to(torch.bfloat16),
+                    beta=beta_aug,
+                    initial_state=recurrent_state,
+                    output_final_state=use_cache,
+                    cu_seqlens=None,
+                    use_qk_l2norm_in_kernel=(self.qk_norm == 'l2'),
                 )
+            else:
+                raise NotImplementedError(f"Not supported mode `{mode}`.")
 
-                # # Accumulate compressed read into the last token of the block
-                # outputs[-1] = outputs[-1] + o_bar.float()
-
-                # Carry final state to next block
-                recurrent_state = block_state
-
-            o = torch.cat(outputs, dim=1)                    # [B, T, H, D_v]
-
-            # State is only meaningful for caching when use_cache=True
-            if not use_cache:
-                recurrent_state = None
+            o = o_aug[:, real_pos].float()
 
         # =====================================================================
         # 8. Update cache

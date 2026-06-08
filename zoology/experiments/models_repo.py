@@ -784,7 +784,7 @@ def add_dual_state_delta_net(models, conv_mixer, input_seq_len, model_factory_kw
     """
     block_type = "TransformerBlock"
     for scale_ratio in [8]:
-        for feature_ratio in [1, 4]:
+        for feature_ratio in [8]:
             for d_model in [64, 128, 256]:
                 dsd_mixer = dict(
                     name="zoology.mixers.dual_state_delta_net.DualStateDeltaNet",
@@ -803,9 +803,7 @@ def add_dual_state_delta_net(models, conv_mixer, input_seq_len, model_factory_kw
                     name="zoology.mixers.hybrid.Hybrid",
                     kwargs={"configs": mixers}
                 )
-                tag = f"ds_dn_r{scale_ratio}"
-                if feature_ratio > 1:
-                    tag += f"_f{feature_ratio}"
+                tag = f"dsdn_r{scale_ratio}f{feature_ratio}"
                 model = ModelConfig(
                     block_type=block_type,
                     d_model=d_model,

@@ -129,6 +129,7 @@ class DualStateDeltaNet(nn.Module):
         scale_ratio: int = 4,
         feature_ratio: int = 1,
         use_beta: bool = True,
+        use_read_gate: bool = True,
         use_gate: bool = False,
         use_short_conv: bool = True,
         conv_size: int = 4,
@@ -157,6 +158,7 @@ class DualStateDeltaNet(nn.Module):
         self.scale_ratio = scale_ratio
         self.feature_ratio = feature_ratio
         self.use_beta = use_beta
+        self.use_read_gate = use_read_gate
         self.use_gate = use_gate
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -259,6 +261,13 @@ class DualStateDeltaNet(nn.Module):
 
         # Aux beta (per-head gate for aux delta writes)
         self.aux_b_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
+
+        # =====================================================================
+        # Read gate: learned mixing of main vs aux outputs
+        #   α = sigmoid(MLP(h_t))  — model learns when to "read detail" vs "read reference"
+        # =====================================================================
+        if self.use_read_gate:
+            self.read_gate_proj = nn.Linear(hidden_size, self.num_heads, bias=False)
 
     # ======================================================================
 
@@ -495,9 +504,19 @@ class DualStateDeltaNet(nn.Module):
             aux_state = None
 
         # =====================================================================
-        # 5. Combine main + aux outputs
+        # 5. Combine main + aux outputs (with read gate)
+        #    α = sigmoid(proj(hidden_states))  — per-head, per-token
+        #    o = α ⊙ o_main + (1-α) ⊙ o_aux_up
+        #    Model learns when to "read detail" (main) vs "read reference" (aux)
         # =====================================================================
-        o = o_main + o_aux_up
+        if self.use_read_gate and isinstance(o_aux_up, torch.Tensor):
+            # [B, T, H] — per-head gate
+            read_gate = self.read_gate_proj(hidden_states).sigmoid()
+            if attention_mask is not None:
+                read_gate = read_gate.mul(attention_mask[:, -read_gate.shape[-2]:, None])
+            o = read_gate.unsqueeze(-1) * o_main + (1 - read_gate.unsqueeze(-1)) * o_aux_up
+        else:
+            o = o_main + o_aux_up
 
         # =====================================================================
         # 6. Cache update
